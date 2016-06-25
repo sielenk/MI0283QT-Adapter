@@ -5,14 +5,6 @@
 //----- DEFINES -----
 #define VERSION         "0.07"
 
-//LCD support (define only one)
-//#define LCD_MI0283QT9
-#define LCD_UG12D228AA
-
-#ifdef LCD_MI0283QT9
-#define TP_SUPPORT //touch panel support
-#endif
-
 #define DEFAULT_CLOCK   48000000UL    //Hz, 12 16* 24 32* 36 48* MHz (*crystal)
 #define DEFAULT_POWER   0             //0-100 power for backlight
 #define DEFAULT_LDRTIME 500           //check LDR every 500 milliseconds
@@ -37,13 +29,6 @@
 #define ENC_SW          2
 #define ENC_A           1
 #define ENC_B           0
-//Navigation Switch
-#define NAV_PORT        1
-#define NAV_SW          2
-#define NAV_A           0
-#define NAV_B           1
-#define NAV_C           4
-#define NAV_D           3
 //ADC
 #define ADC_PORT        1
 #define ADC_4           3  //R_PIO1_3 = AD4
@@ -62,19 +47,6 @@
 #define UART_PORT       1
 #define RX_PIN          6
 #define TX_PIN          7
-//Touch-Panel
-#define XP_PORT         0
-#define XP_PIN          11 //R_PIO0_11 = AD0
-#define XP_AD           0
-#define XM_PORT         1
-#define XM_PIN          1  //R_PIO1_1 = AD2
-#define XM_AD           2
-#define YP_PORT         1
-#define YP_PIN          0  //R_PIO1_0 = AD1
-#define YP_AD           1
-#define YM_PORT         1
-#define YM_PIN          2  //R_PIO1_2 = AD3
-#define YM_AD           3
 
 
 //----- GLOBAL MACROS -----

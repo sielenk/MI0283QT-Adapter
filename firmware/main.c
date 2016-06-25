@@ -7,11 +7,9 @@
 #include "iap.h"
 #include "cmd.h"
 #include "interface.h"
-#include "lcd_mi0283qt9.h"
 #include "lcd_ug12d228aa.h"
 #include "lcd.h"
 #include "lcd_font8x8.h"
-#include "tp.h"
 
 //set read/write byte count for position data
 #if ((LCD_WIDTH > 255) || (LCD_HEIGHT > 255))
@@ -27,19 +25,12 @@ uint32_t global_buffer[FLASH_SECTOR_BYTES/4]; //see iap.h
 volatile uint_least32_t ms_ticks=0;
 volatile uint_least8_t features=0, status=0, io_config=0;
 
-#ifndef TP_SUPPORT
 #define ENC_AB   ((1<<ENC_A)|(1<<ENC_B))
 #define ENC_BITS ((1<<ENC_SW)|ENC_AB)
 
-volatile uint32_t enc_ab=0;
-volatile uint32_t enc_pos=0;
+volatile int32_t       enc_delta=0;
+volatile uint_least8_t enc_last;
 volatile uint_least8_t enc_sw=0;
-
-volatile uint_least8_t nav_sw=0;
-volatile int_least8_t nav_hdelta=0, nav_vdelta=0; //h=left-right, v=up-down
-uint_least32_t nav_last=0;
-
-#endif
 
 typedef struct
 {
@@ -52,33 +43,47 @@ typedef struct
   uint8_t byteorder;
   uint16_t fgcolor;
   uint16_t bgcolor;
-  CAL_MATRIX tp;
   uint32_t padding;
 } SETTINGS;
 SETTINGS *usersettings = (SETTINGS*)(FLASH_BYTES-128); //last 128 bytes are for settings
 
 
+// 3 -> 2 -> 0 -> 1 -> 3 ...
+
+static int8_t const enc_decode[16] =
+{
+		 0,	// 0 -> 0
+		 1, // 1 -> 0
+		-1, // 2 -> 0
+		 0, // 3 -> 0
+		-1, // 0 -> 1
+		 0, // 1 -> 1
+		 0, // 2 -> 1
+		 0, // 3 -> 1
+		 1, // 0 -> 2
+		 0, // 1 -> 2
+		 0, // 2 -> 2
+		 0, // 3 -> 2
+		 0, // 0 -> 3
+		 0, // 1 -> 3
+		 0, // 2 -> 3
+		 0  // 3 -> 3
+};
+
 void SysTick_Handler(void) //1ms
 {
   ms_ticks++;
 
-#ifndef TP_SUPPORT
-
   static uint_least8_t enc_t=0, enc_sw_t=0;
-  static uint_least8_t nav_t=0, nav_sw_t=0, inc_h=0, inc_v=0;
-  uint_least32_t pin, p;
 
   if(features & FEATURE_ENC)
   {
-    if(++enc_t == 5) //5ms
+	if(++enc_t == 5) //5ms
     {
       enc_t = 0;
 
-      //get pin state
-      pin = GPIO_GETPORT(ENC_PORT, ENC_BITS);
-
       //check encoder switch
-      if((pin & (1<<ENC_SW)) == 0)
+      if(GPIO_GETPIN(ENC_PORT, ENC_SW) == 0)
       {
         enc_sw_t++;
         if(enc_sw_t >= (1000/5)) //1000ms
@@ -96,75 +101,6 @@ void SysTick_Handler(void) //1ms
       }
     }
   }
-
-  if(features & FEATURE_NAV)
-  {
-    if(++nav_t == 25) //25ms
-    {
-      nav_t = 0;
-
-      //get pin state
-      p        = GPIO_GETPORT(NAV_PORT, (1<<NAV_SW)|(1<<NAV_A)|(1<<NAV_B)|(1<<NAV_C)|(1<<NAV_D));
-      pin      = p & nav_last;
-      nav_last = p;
-
-      //check nav switches
-      if((pin & (1<<NAV_C)) == 0) //right
-      {
-        nav_sw |= 0x10;
-        nav_hdelta += inc_h;
-        inc_h = 0;
-      }
-      else if((pin & (1<<NAV_A)) == 0) //left
-      {
-        nav_sw |= 0x20;
-        nav_hdelta -= inc_h;
-        inc_h = 0;
-      }
-      else
-      {
-        inc_h = 1;
-      }
-
-      if((pin & (1<<NAV_D)) == 0) //up
-      {
-        nav_sw |= 0x40;
-        nav_vdelta += inc_v;
-        inc_v = 0;
-      }
-      else if((pin & (1<<NAV_B)) == 0) //down
-      {
-        nav_sw |= 0x80;
-        nav_vdelta -= inc_v;
-        inc_v = 0;
-      }
-      else
-      {
-        inc_v = 1;
-      }
-
-      if((pin & (1<<NAV_SW)) == 0)
-      {
-        nav_sw_t++;
-        if(nav_sw_t >= (1000/25)) //1000ms
-        {
-          nav_sw |= 0x02;
-        }
-        if(nav_sw_t >= (100/25)) //100ms
-        {
-          nav_sw |= 0x01;
-        }
-      }
-      else
-      {
-        nav_sw_t = 0;
-      }
-    }
-  }
-
-#endif
-
-  return;
 }
 
 
@@ -177,8 +113,8 @@ int_least8_t enc_getdelta(void)
 
   DISABLE_IRQ();
 
-  val = enc_delta;
-  enc_delta = 0;
+  val = enc_delta >> 1;
+  enc_delta &= 1;
 
   ENABLE_IRQ();
 
@@ -197,11 +133,6 @@ uint_least8_t enc_getsw(void)
 }
 
 
-static uint32_t get_enc_ab(void)
-{
-	return GPIO_GETPORT(ENC_PORT, ENC_AB);
-}
-
 void enc_init(void)
 {
   //GPIO_PORT(ENC_PORT)->DIR &= (1<<ENC_SW)|(1<<ENC_A)|(1<<ENC_B);
@@ -209,8 +140,8 @@ void enc_init(void)
   IOCON_SETRPIN(ENC_PORT, ENC_A,  IOCON_R_PIO | IOCON_PULLUP | IOCON_DIGITAL); //GPIO with pull-up
   IOCON_SETRPIN(ENC_PORT, ENC_B,  IOCON_R_PIO | IOCON_PULLUP | IOCON_DIGITAL); //GPIO with pull-up
 
-  enc_ab = get_enc_ab();
   enc_delta = enc_sw = 0;
+  enc_last = GPIO_GETPORT(ENC_PORT, ENC_AB);
 
   GPIO_PORT(ENC_PORT)->IBE |= ENC_AB;
   GPIO_PORT(ENC_PORT)->IE  |= ENC_AB;
@@ -219,82 +150,13 @@ void enc_init(void)
   return;
 }
 
+
 void CONCAT(CONCAT(PIOINT, ENC_PORT), _IRQHandler)(void)
 {
-	// 00
-	// 01
-	// 11
-	// 10
+	enc_last   = (enc_last << 2 | GPIO_GETPORT(ENC_PORT, ENC_AB)) & 0xF;
+    enc_delta += enc_decode[enc_last];
 
-	uint32_t const enc_ab_new = get_enc_pos();
-
-
-	(enc_ab_new & 1)
-
-	uint32_t foo = enc_pos & 3;
-    uint32_t bar = enc_pos >> 2;
-
-	if (foo == 3 && enc_pos_new == 0) ++bar;
-	if (foo == 0 && enc_pos_new == 3) --bar;
-
-	enc_pos = (bar << 2) | enc_pos_new;
-
-	enc_ab = enc_ab_new;
-
-	GPIO_PORT(ENC_PORT)->IC |= ENC_AB;
-
-	return;
-}
-
-
-int_least8_t nav_gethdelta(void)
-{
-  int_least8_t val;
-
-  val = nav_hdelta;
-  nav_hdelta = 0;
-
-  return val;
-}
-
-
-int_least8_t nav_getvdelta(void)
-{
-  int_least8_t val;
-
-  val = nav_vdelta;
-  nav_vdelta = 0;
-
-  return val;
-}
-
-
-uint_least8_t nav_getsw(void)
-{
-  uint_least8_t sw;
-
-  sw = nav_sw;
-  nav_sw = 0;
-
-  return sw;
-}
-
-
-void nav_init(void)
-{
-  //GPIO_PORT(NAV_PORT)->DIR &= (1<<NAV_SW)|(1<<NAV_A)|(1<<NAV_B)|(1<<NAV_C)|(1<<NAV_D);
-  IOCON_SETRPIN(NAV_PORT, NAV_SW, IOCON_R_PIO | IOCON_PULLUP | IOCON_DIGITAL); //GPIO with pull-up
-  IOCON_SETRPIN(NAV_PORT, NAV_A,  IOCON_R_PIO | IOCON_PULLUP | IOCON_DIGITAL); //GPIO with pull-up
-  IOCON_SETRPIN(NAV_PORT, NAV_B,  IOCON_R_PIO | IOCON_PULLUP | IOCON_DIGITAL); //GPIO with pull-up
-  IOCON_SETPIN(NAV_PORT,  NAV_C,  IOCON_PIO   | IOCON_PULLUP | IOCON_DIGITAL); //GPIO with pull-up
-  IOCON_SETRPIN(NAV_PORT, NAV_D,  IOCON_R_PIO | IOCON_PULLUP | IOCON_DIGITAL); //GPIO with pull-up
-
-  nav_sw = 0;
-  nav_hdelta = 0;
-  nav_vdelta = 0;
-  nav_last = 0;
-
-  return;
+    GPIO_PORT(ENC_PORT)->IC |= ENC_AB;
 }
 
 
@@ -684,18 +546,6 @@ void cmd_ctrl_save(uint_least8_t interface, uint_least32_t baudrate, uint_least8
 {
   SETTINGS s;
 
-#ifdef TP_SUPPORT
-  CAL_MATRIX *tp;
-  tp = tp_getmatrix();
-  s.tp.a = tp->a;
-  s.tp.b = tp->b;
-  s.tp.c = tp->c;
-  s.tp.d = tp->d;
-  s.tp.e = tp->e;
-  s.tp.f = tp->f;
-  s.tp.div = tp->div;
-#endif
-
   s.bgcolor   = bgcolor;
   s.fgcolor   = fgcolor; 
   s.byteorder = byteorder;
@@ -712,100 +562,15 @@ void cmd_ctrl_save(uint_least8_t interface, uint_least32_t baudrate, uint_least8
 }
 
 
-#ifdef TP_SUPPORT
-
-void cmd_tp_calibrate(uint_least16_t fgcolor, uint_least16_t bgcolor)
-{
-  uint_least8_t i;
-  CAL_POINT lcd_points[3] = {CAL_POINT1, CAL_POINT2, CAL_POINT3}; //calibration point postions
-  CAL_POINT tp_points[3];
-
-  tp_init(); //enable/reset touch
-
-  tp_read();
-  if(tp_rawz())
-  {
-     lcd_clear(bgcolor);
-     lcd_drawtext(10, 10, "Release Touchpanel.", 1, fgcolor, 0, 0);
-     while(tp_rawz() > MIN_PRESSURE){ tp_read(); };
-  }
-
-  do
-  {
-    //clear screen and wait for touch release
-    lcd_clear(bgcolor);
-    lcd_setorientation(180);
-    lcd_drawtext(LCD_CENTER, (LCD_HEIGHT/2)+10, "Calibration", 2, RGB(128,128,128), 0, 0);
-    lcd_setorientation(0);
-    lcd_drawtext(LCD_CENTER, (LCD_HEIGHT/2)+10, "Calibration", 2, RGB(128,128,128), 0, 0);
-
-    for(i=0; i<3; )
-    {
-      //draw point
-      lcd_drawcircle(lcd_points[i].x, lcd_points[i].y, 15, fgcolor);
-      lcd_drawline(lcd_points[i].x-10, lcd_points[i].y,    lcd_points[i].x-3,  lcd_points[i].y,    fgcolor);
-      lcd_drawline(lcd_points[i].x+3,  lcd_points[i].y,    lcd_points[i].x+10, lcd_points[i].y,    fgcolor);
-      lcd_drawline(lcd_points[i].x,    lcd_points[i].y-10, lcd_points[i].x,    lcd_points[i].y-3,  fgcolor);
-      lcd_drawline(lcd_points[i].x,    lcd_points[i].y+3,  lcd_points[i].x,    lcd_points[i].y+10, fgcolor);
-
-      //touch detected? -> save point
-      tp_read();
-      if(tp_getz() > (MIN_PRESSURE*1.5))
-      {
-        //mark point
-        lcd_fillcircle(lcd_points[i].x, lcd_points[i].y, 4, RGB(255,0,0));
-        //wait and clear point
-        delay_ms(400);
-        lcd_fillcircle(lcd_points[i].x, lcd_points[i].y, 15, bgcolor);
-        //save point
-        tp_points[i].x = tp_rawx();
-        tp_points[i].y = tp_rawy();
-        i++;
-        //wait till press is over
-        while(tp_rawz() > MIN_PRESSURE){ tp_read(); };
-      }
-
-      //data available
-      if(if_available())
-      {
-        if(if_read8() == 0)
-        {
-          i = 0xFF;
-          break;
-        }
-      }
-    }
-  }
-  while((i!=0xFF) && (tp_calmatrix(lcd_points, tp_points)!=0)); //calculate calibration matrix
-
-  tp_init(); //reset touch
-
-  lcd_clear(bgcolor);
-
-  return;
-}
-
-#endif
-
-
 void cmd_lcd_test(uint_least16_t fgcolor, uint_least16_t bgcolor)
 {
   uint_least8_t c=1, f_save=features;
   char tmp[32];
-#ifdef TP_SUPPORT
-  uint_least16_t x, y, z, last_x=0, last_y=0;
-  uint_least32_t ms=0;
-
-  tp_init();
-  ldr_init();
-  features = FEATURE_TP | FEATURE_LDR; //FEATURE_TP | FEATURE_LDR
-#else
   uint_least8_t sw;
-  int_least8_t pos=0, hpos=0, vpos=0;
+  int_least8_t pos=0;
 
   enc_init();
   features = FEATURE_ENC;
-#endif
 
   lcd_fillrect(0,                   0, (LCD_WIDTH-1)/3,     LCD_HEIGHT-1, RGB(255,0,0));
   lcd_fillrect((LCD_WIDTH-1)/3,     0, ((LCD_WIDTH-1)/3)*2, LCD_HEIGHT-1, RGB(0,255,0));
@@ -835,70 +600,19 @@ void cmd_lcd_test(uint_least16_t fgcolor, uint_least16_t bgcolor)
 
   do
   {
-#ifdef TP_SUPPORT
-    tp_read();
-    z = tp_getz();
-    if(z)
-    {
-      x = tp_getx();
-      y = tp_gety();
-      if((x!=last_x) || (y!=last_y))
-      {
-        last_x = x;
-        last_y = y;
-        lcd_fillcircle(x, y, 4, fgcolor); //lcd_drawpixel(x, y);
-        sprintf(tmp, "X%03i Y%03i Z%03i", x, x, z);
-        lcd_drawtext(5, 5, tmp, 0, fgcolor, bgcolor, 1);
-      }
-
-      GPIO_SETPIN(LED_PORT, LED_PIN); //LED on
-    }
-    else
-    {
-      GPIO_CLRPIN(LED_PORT, LED_PIN); //LED off
-    }
-
-    if(features & FEATURE_LDR)
-    {
-      if((get_ms() - ms) >= 100)
-      {
-        ms = get_ms();
-        x = ldr_service(100);
-        sprintf(tmp, "LDR %03i", x);
-        lcd_drawtext(5, 15, tmp, 0, fgcolor, bgcolor, 1);
-      }
-    }
-
-#else //TP_SUPPORT
-
-    pos  += enc_getdelta();
-    hpos += nav_gethdelta();
-    vpos += nav_getvdelta();
-    sprintf(tmp, "P%03i H%03i V%03i", pos, hpos, vpos);
+    pos += enc_getdelta();
+    sprintf(tmp, "P%i %i ", pos, GPIO_GETPORT(ENC_PORT, ENC_AB));
     lcd_drawtext(5, 5, tmp, 0, fgcolor, bgcolor, 1);
 
     sw  = enc_getsw();
-    sw |= nav_getsw();
     if(sw)
     {
       GPIO_SETPIN(LED_PORT, LED_PIN); //LED on
       if(sw & 0x02)
       {
-        if(features == FEATURE_ENC)
-        {
-          sprintf(tmp, "NAV");
-          nav_init();
-          features = FEATURE_NAV;
-        }
-        else //if(features == FEATURE_NAV)
-        {
-          sprintf(tmp, "ENC");
-          enc_init();
-          features = FEATURE_ENC;
-        }
         lcd_drawtext(5, 25, tmp, 0, fgcolor, bgcolor, 1);
         delay_ms(500);
-        while(enc_getsw() || nav_getsw());
+        while(enc_getsw());
       }
       else if(sw & 0x01)
       {
@@ -909,7 +623,7 @@ void cmd_lcd_test(uint_least16_t fgcolor, uint_least16_t bgcolor)
     {
       GPIO_CLRPIN(LED_PORT, LED_PIN); //LED off
     }
-#endif
+
     if(if_available())
     {
       c = if_read8();
@@ -1366,32 +1080,12 @@ int main(void)
   uint_least16_t a, b, c, d, e;
   uint_least16_t color, fgcolor=RGB(0,0,0), bgcolor=RGB(255,255,255);
   uint_least8_t intf=DEFAULT_INTERF, led_power=DEFAULT_POWER;
-  uint_least32_t ms;
-#ifdef TP_SUPPORT
-  uint_least32_t tp_t=0, tp_int=0, ldr_t=0;
-#endif
 
   //init periphery
   init();
 
   //set interface
   intf = usersettings->interface;
-  ms = get_ms();
-  while((GPIO_GETPIN(SS_PORT, SS_PIN) == 0) && ((get_ms()-ms) < 100)) //CS low (100ms timeout)
-  {
-    if(GPIO_GETPIN(SPI_PORT, MOSI_PIN) == 0) //MOSI low
-    {
-      intf = INTERFACE_SPI;
-    }
-    else if(GPIO_GETPIN(UART_PORT, RX_PIN) == 0) //Rx low
-    {
-      intf = INTERFACE_UART;
-    }
-    else
-    {
-      intf = INTERFACE_I2C;
-    }
-  }
 
   //init lcd
   lcd_init();
@@ -1408,9 +1102,6 @@ int main(void)
     set_pwm(DEFAULT_POWER);
 #endif
     delay_ms(1000);
-#ifdef TP_SUPPORT
-    cmd_tp_calibrate(fgcolor, bgcolor);
-#endif
     cmd_ctrl_save(DEFAULT_INTERF, DEFAULT_BAUD, DEFAULT_ADDR, (DEFAULT_CLOCK/1000000UL), DEFAULT_POWER, DEFAULT_ORDER, fgcolor, bgcolor);
     cmd_lcd_test(fgcolor, bgcolor);
     intf = DEFAULT_INTERF;
@@ -1418,22 +1109,10 @@ int main(void)
 
   //load config data and init touch panel, encoder, nav switch, interface
   sysclock(usersettings->sysclock*1000000UL);
-#ifdef TP_SUPPORT
-  if(features & FEATURE_TP)
-  {
-    tp_init();
-  }
-  tp_setmatrix(usersettings->tp.a, usersettings->tp.b, usersettings->tp.c, usersettings->tp.d, usersettings->tp.e, usersettings->tp.f, usersettings->tp.div);
-#else
   if(features & FEATURE_ENC)
   {
     enc_init();
   }
-  if(features & FEATURE_NAV)
-  {
-    nav_init();
-  }
-#endif
   fgcolor = usersettings->fgcolor;
   bgcolor = usersettings->bgcolor;
   lcd_clear(bgcolor);
@@ -1446,44 +1125,6 @@ int main(void)
   //main loop
   while(1)
   {
-    ms = get_ms();
-#ifdef TP_SUPPORT
-    //read ldr and set backlight
-    if(features & FEATURE_LDR)
-    {
-      if(if_available() == 0)
-      {
-        if((ms - ldr_t) >= DEFAULT_LDRTIME)
-        {
-          ldr_t = ms;
-          led_power = ldr_service(led_power);
-        }
-      }
-    }
-
-    //read touch panel
-    if(features & FEATURE_TP)
-    {
-      if((ms - tp_t) >= tp_int)
-      {
-        tp_t = ms;
-        if(tp_read()) //touch press?
-        {
-          io_set(FEATURE_TP); //set status + IRQ output
-        }
-      }
-      if(if_available() == 0)
-      {
-        tp_int = 10; //10ms
-        continue;
-      }
-      else
-      {
-        tp_int = 50; //50ms (slow down tp read when data is available)
-      }
-    }
-#endif
-
     c = if_read8();
     switch(c)
     {
@@ -1517,14 +1158,7 @@ int main(void)
         break;
       case CMD_FEATURES:
         a  = FEATURE_LCD;
-#ifdef TP_SUPPORT
-        a |= FEATURE_TP;
-        a |= FEATURE_LDR;
-        a |= FEATURE_IRQ;
-#else
         a |= FEATURE_ENC;
-        a |= FEATURE_NAV;
-#endif
         if_write8(a);
         if_flush();
         break;
@@ -1539,13 +1173,7 @@ int main(void)
           case CMD_CTRL_SYSCLOCK:  sysclock(if_read8()*1000000UL); break;
           case CMD_CTRL_FEATURES:
             a = if_read8();
-#ifdef TP_SUPPORT
-            if(a & FEATURE_TP) { tp_init();  };
-            if(a & FEATURE_LDR){ ldr_init(); };
-#else
             if(a & FEATURE_ENC){ enc_init(); };
-            if(a & FEATURE_NAV){ nav_init(); };
-#endif
             features = a;
             break;
         }
@@ -1939,73 +1567,6 @@ int main(void)
         cmd_lcd_drawtext(bgcolor, fgcolor, 1);
         break;
 
-#ifdef TP_SUPPORT
-
-      case CMD_TP_POS:
-        if_write(tp_getx());
-        if_write(tp_gety());
-        if_write(tp_getz()); //tp_getz() tp_rawz()
-        io_clr(FEATURE_TP);
-        if_flush();
-        break;
-      case CMD_TP_X:
-        if_write(tp_getx());
-        io_clr(FEATURE_TP);
-        if_flush();
-        break;
-      case CMD_TP_Y:
-        if_write(tp_gety());
-        io_clr(FEATURE_TP);
-        if_flush();
-        break;
-      case CMD_TP_Z:
-        if_write(tp_rawz()); //tp_rawz() tp_getz()
-        io_clr(FEATURE_TP);
-        if_flush();
-        break;
-      case CMD_TP_WAITPRESS:
-        while(tp_getz() == 0){ tp_read(); delay_ms(5); }
-        if_write(tp_getx());
-        if_write(tp_gety());
-        io_clr(FEATURE_TP);
-        if_flush();
-        break;
-      case CMD_TP_WAITRELEASE:
-        while(tp_rawz() != 0){ tp_read(); delay_ms(5); }
-        if_write(tp_getx());
-        if_write(tp_gety());
-        io_clr(FEATURE_TP);
-        if_flush();
-        break;
-      case CMD_TP_WAITMOVE:
-        while(tp_rawz() == 0){ tp_read(); delay_ms(5); }
-        a = tp_getx();
-        b = tp_gety();
-        while(tp_rawz() != 0){ tp_read(); delay_ms(5); }
-        c = tp_getx();
-        d = tp_gety();
-        e = 0;
-             if((a > c) && ((a-c) >= 20)) { e |= 0x01; } //x-
-        else if((a < c) && ((c-a) >= 20)) { e |= 0x02; } //x+
-             if((b > d) && ((b-d) >= 20)) { e |= 0x04; } //y-
-        else if((b < d) && ((d-b) >= 20)) { e |= 0x08; } //y+
-        if_write8(e);
-        io_clr(FEATURE_TP);
-        if_flush();
-        break;
-      case CMD_TP_CALIBRATE:
-        if(led_power == 0)
-        {
-          set_pwm(50);
-        }
-        cmd_tp_calibrate(fgcolor, bgcolor);
-        if_write8(CMD_TP_CALIBRATE);
-        io_clr(FEATURE_TP);
-        if_flush();
-        break;
-
-#else //TP_SUPPORT
-
       case CMD_ENC_POS:
         if_write8(enc_getdelta());
         if_write8(enc_getsw());
@@ -2031,37 +1592,6 @@ int main(void)
         io_clr(FEATURE_ENC);
         if_flush();
         break;
-
-      case CMD_NAV_POS:
-        if_write8(nav_gethdelta());
-        if_write8(nav_getvdelta());
-        if_write8(nav_getsw());
-        io_clr(FEATURE_NAV);
-        if_flush();
-        break;
-      case CMD_NAV_SW:
-        if_write8(nav_getsw());
-        io_clr(FEATURE_NAV);
-        if_flush();
-        break;
-      case CMD_NAV_WAITPRESS:
-        while(nav_getsw() == 0);
-        if_write8(nav_gethdelta());
-        if_write8(nav_getvdelta());
-        if_write8(nav_getsw());
-        io_clr(FEATURE_NAV);
-        if_flush();
-        break;
-      case CMD_NAV_WAITRELEASE:
-        while(GPIO_GETPIN(NAV_PORT, NAV_SW) == 0);
-        if_write8(nav_gethdelta());
-        if_write8(nav_getvdelta());
-        if_write8(nav_getsw());
-        io_clr(FEATURE_NAV);
-        if_flush();
-        break;
-
-#endif
     }
   }
 

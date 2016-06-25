@@ -5,9 +5,6 @@
 #include "lcd.h"
 #include "lcd_ug12d228aa.h"
 
-#ifdef LCD_UG12D228AA
-
-
 #define LCD_PORT        2
 #define DATA_PINS       0xFF
 #define DATA_WR(x)      GPIO_SETPORT(LCD_PORT, DATA_PINS, x)
@@ -325,6 +322,3 @@ __attribute__((always_inline)) __INLINE void lcd_enable(void)
 
   return;
 }
-
-
-#endif //LCD_UG12D228AA

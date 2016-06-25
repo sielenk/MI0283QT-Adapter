@@ -1,8 +1,6 @@
 #ifndef _LCD_UG12D228AA_H_
 #define _LCD_UG12D228AA_H_
 
-#ifdef LCD_UG12D228AA
-
 
 //----- DEFINES -----
 #define LCD_WIDTH                      128
@@ -56,8 +54,5 @@ void                                   lcd_wrdata8(uint_least8_t data);
 void                                   lcd_wrcmd8(uint_least8_t cmd);
 void                                   lcd_disable(void);
 void                                   lcd_enable(void);
-
-
-#endif //LCD_UG12D228AA
 
 #endif //_LCD_UG12D228AA_H_
