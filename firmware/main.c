@@ -13,7 +13,6 @@
 #include "lcd_font8x8.h"
 #include "tp.h"
 
-
 //set read/write byte count for position data
 #if ((LCD_WIDTH > 255) || (LCD_HEIGHT > 255))
 # define if_read  if_read16
@@ -27,12 +26,20 @@
 uint32_t global_buffer[FLASH_SECTOR_BYTES/4]; //see iap.h
 volatile uint_least32_t ms_ticks=0;
 volatile uint_least8_t features=0, status=0, io_config=0;
+
+#ifndef TP_SUPPORT
+#define ENC_AB   ((1<<ENC_A)|(1<<ENC_B))
+#define ENC_BITS ((1<<ENC_SW)|ENC_AB)
+
+volatile uint32_t enc_ab=0;
+volatile uint32_t enc_pos=0;
 volatile uint_least8_t enc_sw=0;
-volatile int_least8_t enc_delta=0;
-uint_least8_t enc_last=0;
+
 volatile uint_least8_t nav_sw=0;
 volatile int_least8_t nav_hdelta=0, nav_vdelta=0; //h=left-right, v=up-down
 uint_least32_t nav_last=0;
+
+#endif
 
 typedef struct
 {
@@ -60,7 +67,6 @@ void SysTick_Handler(void) //1ms
   static uint_least8_t enc_t=0, enc_sw_t=0;
   static uint_least8_t nav_t=0, nav_sw_t=0, inc_h=0, inc_v=0;
   uint_least32_t pin, p;
-  uint_least8_t n, dif;
 
   if(features & FEATURE_ENC)
   {
@@ -69,24 +75,7 @@ void SysTick_Handler(void) //1ms
       enc_t = 0;
 
       //get pin state
-      pin = GPIO_GETPORT(ENC_PORT, (1<<ENC_SW)|(1<<ENC_A)|(1<<ENC_B));
- 
-      //check encoder phases
-      n = 0;
-      if(pin & (1<<ENC_A))
-      {
-        n = 3;
-      }
-      if(pin & (1<<ENC_B))
-      {
-        n ^= 1; //convert gray to binary
-      }
-      dif = enc_last - n; //difference last - new
-      if(dif & 1) //bit 0 = value (1)
-      {               
-        enc_last = n; // store new as next last
-        enc_delta += (dif & 2) - 1; //bit 1 = direction (+/-)
-      }
+      pin = GPIO_GETPORT(ENC_PORT, ENC_BITS);
 
       //check encoder switch
       if((pin & (1<<ENC_SW)) == 0)
@@ -189,15 +178,7 @@ int_least8_t enc_getdelta(void)
   DISABLE_IRQ();
 
   val = enc_delta;
-
-  //read single step encoders
-  // enc_delta = 0;
-  //read two step encoders
-  // enc_delta = val & 1;
-  // val >>= 1;
-  //read four step encoders
-  enc_delta = val & 3;
-  val >>= 2;
+  enc_delta = 0;
 
   ENABLE_IRQ();
 
@@ -216,6 +197,11 @@ uint_least8_t enc_getsw(void)
 }
 
 
+static uint32_t get_enc_ab(void)
+{
+	return GPIO_GETPORT(ENC_PORT, ENC_AB);
+}
+
 void enc_init(void)
 {
   //GPIO_PORT(ENC_PORT)->DIR &= (1<<ENC_SW)|(1<<ENC_A)|(1<<ENC_B);
@@ -223,18 +209,41 @@ void enc_init(void)
   IOCON_SETRPIN(ENC_PORT, ENC_A,  IOCON_R_PIO | IOCON_PULLUP | IOCON_DIGITAL); //GPIO with pull-up
   IOCON_SETRPIN(ENC_PORT, ENC_B,  IOCON_R_PIO | IOCON_PULLUP | IOCON_DIGITAL); //GPIO with pull-up
 
-  if(GPIO_GETPIN(ENC_PORT, ENC_A))
-  {
-    enc_last = 3;
-  }
-  if(GPIO_GETPIN(ENC_PORT, ENC_B))
-  {
-    enc_last ^= 1; //convert gray to binary
-  }
-  enc_delta = 0;
-  enc_sw = 0;
+  enc_ab = get_enc_ab();
+  enc_delta = enc_sw = 0;
+
+  GPIO_PORT(ENC_PORT)->IBE |= ENC_AB;
+  GPIO_PORT(ENC_PORT)->IE  |= ENC_AB;
+  NVIC_EnableIRQ(CONCAT(CONCAT(EINT, ENC_PORT), _IRQn));
 
   return;
+}
+
+void CONCAT(CONCAT(PIOINT, ENC_PORT), _IRQHandler)(void)
+{
+	// 00
+	// 01
+	// 11
+	// 10
+
+	uint32_t const enc_ab_new = get_enc_pos();
+
+
+	(enc_ab_new & 1)
+
+	uint32_t foo = enc_pos & 3;
+    uint32_t bar = enc_pos >> 2;
+
+	if (foo == 3 && enc_pos_new == 0) ++bar;
+	if (foo == 0 && enc_pos_new == 3) --bar;
+
+	enc_pos = (bar << 2) | enc_pos_new;
+
+	enc_ab = enc_ab_new;
+
+	GPIO_PORT(ENC_PORT)->IC |= ENC_AB;
+
+	return;
 }
 
 

@@ -259,6 +259,8 @@ void spi_init(void)
 
   NVIC_EnableIRQ(SSP0_IRQn); //enable interrupt
 
+  (void)c; // to silence the warning
+
   return;
 }
 
@@ -315,6 +317,8 @@ void PIOINT0_IRQHandler(void)
     NVIC_DisableIRQ(UART_IRQn);
     IOCON_SETPIN(UART_PORT, TX_PIN, 0x00); //GPIO
   }
+
+  (void)c; // to silence the warning
 
   return;
 }
@@ -403,6 +407,8 @@ void uart_init(void)
     NVIC_EnableIRQ(UART_IRQn);
   }
   NVIC_EnableIRQ(EINT0_IRQn); //enable external interrupt
+
+  (void)c; // to silence the warning
 
   return;
 }
