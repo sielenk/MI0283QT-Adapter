@@ -75,6 +75,7 @@
 #define IOCON_NOPULL                   (0x00<<3) //no pull-down/pull-up
 #define IOCON_PULLDOWN                 (0x01<<3) //pull-down
 #define IOCON_PULLUP                   (0x02<<3) //pull-up
+#define IOCON_HYS                      (0x01<<5) //hysteresis
 #define IOCON_ANALOG                   (0x00<<7) //analog (adc pins)
 #define IOCON_DIGITAL                  (0x01<<7) //digital (adc pins)
 #define IOCON_SETRPIN(port, pin, val)  LPC_IOCON->CONCAT4(R_PIO, port, _, pin) = val

@@ -48,28 +48,6 @@ typedef struct
 SETTINGS *usersettings = (SETTINGS*)(FLASH_BYTES-128); //last 128 bytes are for settings
 
 
-// 3 -> 2 -> 0 -> 1 -> 3 ...
-
-static int8_t const enc_decode[16] =
-{
-		 0,	// 0 -> 0
-		 1, // 1 -> 0
-		-1, // 2 -> 0
-		 0, // 3 -> 0
-		-1, // 0 -> 1
-		 0, // 1 -> 1
-		 0, // 2 -> 1
-		 0, // 3 -> 1
-		 1, // 0 -> 2
-		 0, // 1 -> 2
-		 0, // 2 -> 2
-		 0, // 3 -> 2
-		 0, // 0 -> 3
-		 0, // 1 -> 3
-		 0, // 2 -> 3
-		 0  // 3 -> 3
-};
-
 void SysTick_Handler(void) //1ms
 {
   ms_ticks++;
@@ -109,12 +87,22 @@ void SysTick_Handler(void) //1ms
 
 int_least8_t enc_getdelta(void)
 {
-  int_least8_t val;
+  int32_t val;
 
   DISABLE_IRQ();
 
-  val = enc_delta >> 1;
-  enc_delta &= 1;
+  val = enc_delta >> 2;
+
+  if (val > INT8_MAX)
+  {
+	  val = INT8_MAX;
+  }
+  else if (val < INT8_MIN)
+  {
+	  val = INT8_MIN;
+  }
+
+  enc_delta -= val << 2;
 
   ENABLE_IRQ();
 
@@ -137,8 +125,8 @@ void enc_init(void)
 {
   //GPIO_PORT(ENC_PORT)->DIR &= (1<<ENC_SW)|(1<<ENC_A)|(1<<ENC_B);
   IOCON_SETRPIN(ENC_PORT, ENC_SW, IOCON_R_PIO | IOCON_PULLUP | IOCON_DIGITAL); //GPIO with pull-up
-  IOCON_SETRPIN(ENC_PORT, ENC_A,  IOCON_R_PIO | IOCON_PULLUP | IOCON_DIGITAL); //GPIO with pull-up
-  IOCON_SETRPIN(ENC_PORT, ENC_B,  IOCON_R_PIO | IOCON_PULLUP | IOCON_DIGITAL); //GPIO with pull-up
+  IOCON_SETRPIN(ENC_PORT, ENC_A,  IOCON_R_PIO | IOCON_PULLUP | IOCON_DIGITAL | IOCON_HYS); //GPIO with pull-up
+  IOCON_SETRPIN(ENC_PORT, ENC_B,  IOCON_R_PIO | IOCON_PULLUP | IOCON_DIGITAL | IOCON_HYS); //GPIO with pull-up
 
   enc_delta = enc_sw = 0;
   enc_last = GPIO_GETPORT(ENC_PORT, ENC_AB);
@@ -153,8 +141,16 @@ void enc_init(void)
 
 void CONCAT(CONCAT(PIOINT, ENC_PORT), _IRQHandler)(void)
 {
-	enc_last   = (enc_last << 2 | GPIO_GETPORT(ENC_PORT, ENC_AB)) & 0xF;
-    enc_delta += enc_decode[enc_last];
+	uint32_t const enc_new = GPIO_GETPORT(ENC_PORT, ENC_AB);
+	uint32_t const change  = enc_last ^ enc_new;
+
+	if ((change ^ (change >> 1)) & 1)
+	{
+		int32_t delta = (((enc_new << 1) ^ enc_last) & 2) - 1;
+
+		enc_last   = enc_new;
+		enc_delta += delta;
+	}
 
     GPIO_PORT(ENC_PORT)->IC |= ENC_AB;
 }
@@ -601,7 +597,7 @@ void cmd_lcd_test(uint_least16_t fgcolor, uint_least16_t bgcolor)
   do
   {
     pos += enc_getdelta();
-    sprintf(tmp, "P%i %i ", pos, GPIO_GETPORT(ENC_PORT, ENC_AB));
+    sprintf(tmp, "P%i ", pos);
     lcd_drawtext(5, 5, tmp, 0, fgcolor, bgcolor, 1);
 
     sw  = enc_getsw();
